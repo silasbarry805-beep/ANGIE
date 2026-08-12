@@ -61,6 +61,14 @@ def login_required(view):
     def wrapped(*args, **kwargs):
         if "user_id" not in session:
             return redirect(url_for("auth"))
+        # The session can outlive the actual user record - e.g. if the
+        # database was reset (redeploy on a host with an ephemeral
+        # filesystem) or the account was deleted. Without this check,
+        # every route crashes with a 500 instead of just sending the
+        # person back to log in again.
+        if db.get_user(session["user_id"]) is None:
+            session.clear()
+            return redirect(url_for("auth"))
         return view(*args, **kwargs)
     return wrapped
 
