@@ -22,7 +22,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 {% block head %}{% endblock %}
 </head>
-<body class="theme-{{ user.theme if user else 'light' }}" data-wallpaper="{{ user.wallpaper if user else 'dawn' }}" data-voice-pref="{{ user.voice if user else 'female' }}">
+<body class="theme-{{ user.theme if user else 'light' }} {% block body_class %}{% endblock %}" data-wallpaper="{{ user.wallpaper if user else 'dawn' }}" data-voice-pref="{{ user.voice if user else 'female' }}">
 
 {% if user %}
 <nav class="topnav">

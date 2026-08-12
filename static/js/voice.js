@@ -37,16 +37,23 @@
     if (!voices.length) return null;
 
     const hints = VOICE_PREF === "male" ? MALE_HINTS : FEMALE_HINTS;
-    const englishVoices = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith("en"));
-    const pool = englishVoices.length ? englishVoices : voices;
+
+    // Different devices surface different English locales by default
+    // (en-US, en-GB, en-IN, en-AU, en-ZA, etc.), which can sound quite
+    // different from each other. To keep the voice consistent between
+    // desktop and phone, always prefer en-US first, then en-GB, before
+    // falling back to whatever English voices exist.
+    const enUS = voices.filter((v) => (v.lang || "").toLowerCase() === "en-us");
+    const enGB = voices.filter((v) => (v.lang || "").toLowerCase() === "en-gb");
+    const anyEn = voices.filter((v) => (v.lang || "").toLowerCase().startsWith("en"));
+
+    const pool = enUS.length ? enUS : (enGB.length ? enGB : (anyEn.length ? anyEn : voices));
 
     const byHint = pool.find((v) =>
       hints.some((hint) => v.name.toLowerCase().includes(hint))
     );
     if (byHint) return byHint;
 
-    // Some browsers expose voice.gender directly (non-standard but present
-    // in a few implementations) - use it if the name-based match failed.
     const byGender = pool.find(
       (v) => (v.gender || "").toLowerCase() === VOICE_PREF
     );
@@ -92,7 +99,14 @@
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
     utter.rate = 1.0;
-    utter.pitch = 1.0;
+
+    // Pitch is set based on the preference regardless of whether a
+    // distinctly male/female-named voice was found - some phones only
+    // expose one or two voices total with no gendered variants, so
+    // this guarantees an audible difference between the two settings
+    // even there, instead of both sounding identical.
+    utter.pitch = VOICE_PREF === "male" ? 0.82 : 1.05;
+
     if (cachedVoice) {
       utter.voice = cachedVoice;
       utter.lang = cachedVoice.lang;
