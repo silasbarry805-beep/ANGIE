@@ -1,65 +1,94 @@
-import sqlite3
+import os
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
+from dotenv import load_dotenv
 from pathlib import Path
-from datetime import datetime
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
-DATABASE_PATH = DATA_DIR / "angie.db"
+load_dotenv(BASE_DIR / ".env")
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. This app requires a Postgres database - "
+        "add a Postgres instance on Render (or run one locally) and set "
+        "DATABASE_URL in your .env file, e.g. "
+        "postgresql://user:password@host:5432/dbname"
+    )
+
+# A small connection pool - reused across requests instead of opening a
+# brand new TCP connection to Postgres on every single query, which is
+# what the old SQLite version did (cheap for a local file, expensive
+# for a networked database).
+_pool = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
 
 
-def get_connection():
-    conn = sqlite3.connect(DATABASE_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+def _translate(query):
+    """Existing call sites throughout this file use SQLite-style '?'
+    placeholders - translate them to psycopg2's '%s' style so none of
+    those call sites need to change."""
+    return query.replace("?", "%s")
 
 
 def execute(query, params=()):
-    conn = get_connection()
+    conn = _pool.getconn()
     try:
-        cur = conn.execute(query, params)
+        with conn.cursor() as cur:
+            cur.execute(_translate(query), tuple(params))
         conn.commit()
-        return cur.lastrowid
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        _pool.putconn(conn)
+
+
+def insert_returning_id(query, params=()):
+    """Same as execute(), but for INSERT statements where the caller
+    needs the newly created row's id back (SQLite's cursor.lastrowid
+    equivalent - Postgres needs an explicit RETURNING clause for this)."""
+    conn = _pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_translate(query) + " RETURNING id", tuple(params))
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _pool.putconn(conn)
 
 
 def fetch_one(query, params=()):
-    conn = get_connection()
+    conn = _pool.getconn()
     try:
-        row = conn.execute(query, params).fetchone()
-        return dict(row) if row else None
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(_translate(query), tuple(params))
+            row = cur.fetchone()
+            return dict(row) if row else None
     finally:
-        conn.close()
+        _pool.putconn(conn)
 
 
 def fetch_all(query, params=()):
-    conn = get_connection()
+    conn = _pool.getconn()
     try:
-        rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(_translate(query), tuple(params))
+            rows = cur.fetchall()
+            return [dict(row) for row in rows]
     finally:
-        conn.close()
-
-
-def _ensure_column(table_name, column_name, column_def):
-    conn = get_connection()
-    try:
-        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")}
-        if column_name not in columns:
-            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
-            conn.commit()
-    finally:
-        conn.close()
+        _pool.putconn(conn)
 
 
 def initialize_database():
     execute("""
         CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
@@ -76,19 +105,9 @@ def initialize_database():
         )
     """)
 
-    _ensure_column("users", "full_name", "TEXT DEFAULT ''")
-    _ensure_column("users", "language", "TEXT DEFAULT 'English'")
-    _ensure_column("users", "voice", "TEXT DEFAULT 'female'")
-    _ensure_column("users", "theme", "TEXT DEFAULT 'light'")
-    _ensure_column("users", "wallpaper", "TEXT DEFAULT 'dawn'")
-    _ensure_column("users", "voice_reply", "INTEGER DEFAULT 0")
-    _ensure_column("users", "daily_quotes", "INTEGER DEFAULT 1")
-    _ensure_column("users", "scripture", "INTEGER DEFAULT 1")
-    _ensure_column("users", "notifications", "INTEGER DEFAULT 1")
-
     execute("""
         CREATE TABLE IF NOT EXISTS messages(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             topic TEXT NOT NULL,
             sender TEXT NOT NULL,
@@ -100,7 +119,7 @@ def initialize_database():
 
     execute("""
         CREATE TABLE IF NOT EXISTS moods(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             mood TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -110,7 +129,7 @@ def initialize_database():
 
     execute("""
         CREATE TABLE IF NOT EXISTS journal_entries(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             entry TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -128,7 +147,7 @@ def initialize_database():
 # ==========================================================
 
 def create_user(username, email, password_hash, full_name=""):
-    return execute(
+    return insert_returning_id(
         """
         INSERT INTO users(username, email, password_hash, full_name)
         VALUES(?,?,?,?)
